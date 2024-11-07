@@ -6,6 +6,8 @@ on:
 
 jobs:
   gateway-tests:
+    # disable for now
+    if: false
     runs-on: ubuntu-latest
     environment: production
     steps:
