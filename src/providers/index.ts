@@ -5,6 +5,7 @@ import AzureOpenAIConfig from './azure-openai';
 import BedrockConfig from './bedrock';
 import CohereConfig from './cohere';
 import DeepInfraConfig from './deepinfra';
+import NCompassConfig from './ncompass';
 import GoogleConfig from './google';
 import VertexConfig from './google-vertex-ai';
 import MistralAIConfig from './mistral-ai';
@@ -47,6 +48,13 @@ import { UpstageConfig } from './upstage';
 import { LAMBDA } from '../globals';
 import { LambdaProviderConfig } from './lambda';
 import { DashScopeConfig } from './dashscope';
+import XAIConfig from './x-ai';
+import QdrantConfig from './qdrant';
+import SagemakerConfig from './sagemaker';
+import NebiusConfig from './nebius';
+import RecraftAIConfig from './recraft-ai';
+import MilvusConfig from './milvus';
+import ReplicateConfig from './replicate';
 
 const Providers: { [key: string]: ProviderConfigs } = {
   openai: OpenAIConfig,
@@ -62,6 +70,7 @@ const Providers: { [key: string]: ProviderConfigs } = {
   'perplexity-ai': PerplexityAIConfig,
   'mistral-ai': MistralAIConfig,
   deepinfra: DeepInfraConfig,
+  ncompass: NCompassConfig,
   'stability-ai': StabilityAIConfig,
   nomic: NomicConfig,
   ollama: OllamaAPIConfig,
@@ -94,6 +103,13 @@ const Providers: { [key: string]: ProviderConfigs } = {
   upstage: UpstageConfig,
   [LAMBDA]: LambdaProviderConfig,
   dashscope: DashScopeConfig,
+  'x-ai': XAIConfig,
+  qdrant: QdrantConfig,
+  sagemaker: SagemakerConfig,
+  nebius: NebiusConfig,
+  'recraft-ai': RecraftAIConfig,
+  milvus: MilvusConfig,
+  replicate: ReplicateConfig,
 };
 
 export default Providers;

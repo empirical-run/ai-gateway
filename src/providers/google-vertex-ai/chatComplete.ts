@@ -6,13 +6,18 @@ import {
   ContentType,
   Message,
   Params,
+  Tool,
   ToolCall,
+  SYSTEM_MESSAGE_ROLES,
+  MESSAGE_ROLES,
 } from '../../types/requestBody';
 import {
+  AnthropicChatCompleteConfig,
   AnthropicChatCompleteResponse,
   AnthropicChatCompleteStreamResponse,
   AnthropicErrorResponse,
 } from '../anthropic/chatComplete';
+import { AnthropicStreamState } from '../anthropic/types';
 import {
   GoogleMessage,
   GoogleMessageRole,
@@ -24,6 +29,7 @@ import {
 import {
   ChatCompletionResponse,
   ErrorResponse,
+  Logprobs,
   ProviderConfig,
 } from '../types';
 import {
@@ -36,8 +42,24 @@ import type {
   GoogleGenerateContentResponse,
   VertexLlamaChatCompleteStreamChunk,
   VertexLLamaChatCompleteResponse,
+  GoogleSearchRetrievalTool,
 } from './types';
-import { getMimeType } from './utils';
+import {
+  getMimeType,
+  recursivelyDeleteUnsupportedParameters,
+  transformVertexLogprobs,
+} from './utils';
+
+export const buildGoogleSearchRetrievalTool = (tool: Tool) => {
+  const googleSearchRetrievalTool: GoogleSearchRetrievalTool = {
+    googleSearchRetrieval: {},
+  };
+  if (tool.function.parameters?.dynamicRetrievalConfig) {
+    googleSearchRetrievalTool.googleSearchRetrieval.dynamicRetrievalConfig =
+      tool.function.parameters.dynamicRetrievalConfig;
+  }
+  return googleSearchRetrievalTool;
+};
 
 export const VertexGoogleChatCompleteConfig: ProviderConfig = {
   // https://cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versioning#gemini-model-versions
@@ -58,7 +80,7 @@ export const VertexGoogleChatCompleteConfig: ProviderConfig = {
           // From gemini-1.5 onwards, systemInstruction is supported
           // Skipping system message and sending it in systemInstruction for gemini 1.5 models
           if (
-            message.role === 'system' &&
+            SYSTEM_MESSAGE_ROLES.includes(message.role) &&
             !SYSTEM_INSTRUCTION_DISABLED_MODELS.includes(params.model as string)
           )
             return;
@@ -173,7 +195,7 @@ export const VertexGoogleChatCompleteConfig: ProviderConfig = {
         if (!firstMessage) return;
 
         if (
-          firstMessage.role === 'system' &&
+          SYSTEM_MESSAGE_ROLES.includes(firstMessage.role) &&
           typeof firstMessage.content === 'string'
         ) {
           return {
@@ -187,7 +209,7 @@ export const VertexGoogleChatCompleteConfig: ProviderConfig = {
         }
 
         if (
-          firstMessage.role === 'system' &&
+          SYSTEM_MESSAGE_ROLES.includes(firstMessage.role) &&
           typeof firstMessage.content === 'object' &&
           firstMessage.content?.[0]?.text
         ) {
@@ -233,6 +255,14 @@ export const VertexGoogleChatCompleteConfig: ProviderConfig = {
     param: 'generationConfig',
     transform: (params: Params) => transformGenerationConfig(params),
   },
+  logprobs: {
+    param: 'generationConfig',
+    transform: (params: Params) => transformGenerationConfig(params),
+  },
+  top_logprobs: {
+    param: 'generationConfig',
+    transform: (params: Params) => transformGenerationConfig(params),
+  },
   // https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/configure-safety-attributes
   // Example payload to be included in the request that sets the safety settings:
   //   "safety_settings": [
@@ -253,12 +283,30 @@ export const VertexGoogleChatCompleteConfig: ProviderConfig = {
     default: '',
     transform: (params: Params) => {
       const functionDeclarations: any = [];
+      const tools: any = [];
       params.tools?.forEach((tool) => {
         if (tool.type === 'function') {
-          functionDeclarations.push(tool.function);
+          // these are not supported by google
+          recursivelyDeleteUnsupportedParameters(tool.function?.parameters);
+          delete tool.function?.strict;
+
+          if (['googleSearch', 'google_search'].includes(tool.function.name)) {
+            tools.push({ googleSearch: {} });
+          } else if (
+            ['googleSearchRetrieval', 'google_search_retrieval'].includes(
+              tool.function.name
+            )
+          ) {
+            tools.push(buildGoogleSearchRetrievalTool(tool));
+          } else {
+            functionDeclarations.push(tool.function);
+          }
         }
       });
-      return { functionDeclarations };
+      if (functionDeclarations.length) {
+        tools.push({ functionDeclarations });
+      }
+      return tools;
     },
   },
   tool_choice: {
@@ -286,39 +334,20 @@ export const VertexGoogleChatCompleteConfig: ProviderConfig = {
       }
     },
   },
+  labels: {
+    param: 'labels',
+  },
 };
-
-interface AnthropicTool {
-  name: string;
-  description: string;
-  input_schema: {
-    type: string;
-    properties: Record<
-      string,
-      {
-        type: string;
-        description: string;
-      }
-    >;
-    required: string[];
-  };
-}
-
-interface AnthropicToolResultContentItem {
-  type: 'tool_result';
-  tool_use_id: string;
-  content?: string;
-}
-
-type AnthropicMessageContentItem = AnthropicToolResultContentItem | ContentType;
-
-interface AnthropicMessage extends Message {
-  content?: string | AnthropicMessageContentItem[];
-}
 
 interface AnthorpicTextContentItem {
   type: 'text';
   text: string;
+}
+
+interface AnthropicThinkingContentItem {
+  type: 'thinking';
+  thinking: string;
+  signature: string;
 }
 
 interface AnthropicToolContentItem {
@@ -328,231 +357,24 @@ interface AnthropicToolContentItem {
   input: Record<string, any>;
 }
 
-type AnthropicContentItem = AnthorpicTextContentItem | AnthropicToolContentItem;
-
-const transformAssistantMessageForAnthropic = (
-  msg: Message
-): AnthropicMessage => {
-  let content: AnthropicContentItem[] = [];
-  const containsToolCalls = msg.tool_calls && msg.tool_calls.length;
-
-  if (msg.content && typeof msg.content === 'string') {
-    content.push({
-      type: 'text',
-      text: msg.content,
-    });
-  } else if (
-    msg.content &&
-    typeof msg.content === 'object' &&
-    msg.content.length
-  ) {
-    if (msg.content[0].text) {
-      content.push({
-        type: 'text',
-        text: msg.content[0].text,
-      });
-    }
-  }
-  if (containsToolCalls) {
-    msg.tool_calls.forEach((toolCall: any) => {
-      content.push({
-        type: 'tool_use',
-        name: toolCall.function.name,
-        id: toolCall.id,
-        input: JSON.parse(toolCall.function.arguments),
-      });
-    });
-  }
-  return {
-    role: msg.role,
-    content,
-  };
-};
-
-const transformToolMessageForAnthropic = (msg: Message): AnthropicMessage => {
-  return {
-    role: 'user',
-    content: [
-      {
-        type: 'tool_result',
-        tool_use_id: msg.tool_call_id,
-        content: msg.content as string,
-      },
-    ],
-  };
-};
+type AnthropicContentItem =
+  | AnthorpicTextContentItem
+  | AnthropicThinkingContentItem
+  | AnthropicToolContentItem;
 
 export const VertexAnthropicChatCompleteConfig: ProviderConfig = {
-  messages: [
-    {
-      param: 'messages',
-      required: true,
-      transform: (params: Params) => {
-        let messages: AnthropicMessage[] = [];
-        // Transform the chat messages into a simple prompt
-        if (!!params.messages) {
-          params.messages.forEach((msg) => {
-            if (msg.role === 'system') return;
-
-            if (msg.role === 'assistant') {
-              messages.push(transformAssistantMessageForAnthropic(msg));
-            } else if (
-              msg.content &&
-              typeof msg.content === 'object' &&
-              msg.content.length
-            ) {
-              const transformedMessage: Record<string, any> = {
-                role: msg.role,
-                content: [],
-              };
-              msg.content.forEach((item) => {
-                if (item.type === 'text') {
-                  transformedMessage.content.push({
-                    type: item.type,
-                    text: item.text,
-                  });
-                } else if (
-                  item.type === 'image_url' &&
-                  item.image_url &&
-                  item.image_url.url
-                ) {
-                  const parts = item.image_url.url.split(';');
-                  if (parts.length === 2) {
-                    const base64ImageParts = parts[1].split(',');
-                    const base64Image = base64ImageParts[1];
-                    const mediaTypeParts = parts[0].split(':');
-                    if (mediaTypeParts.length === 2 && base64Image) {
-                      const mediaType = mediaTypeParts[1];
-                      transformedMessage.content.push({
-                        type: 'image',
-                        source: {
-                          type: 'base64',
-                          media_type: mediaType,
-                          data: base64Image,
-                        },
-                      });
-                    }
-                  }
-                }
-              });
-              messages.push(transformedMessage as Message);
-            } else if (msg.role === 'tool') {
-              // even though anthropic supports images in tool results, openai doesn't support it yet
-              messages.push(transformToolMessageForAnthropic(msg));
-            } else {
-              messages.push({
-                role: msg.role,
-                content: msg.content,
-              });
-            }
-          });
-        }
-
-        return messages;
-      },
-    },
-    {
-      param: 'system',
-      required: false,
-      transform: (params: Params) => {
-        let systemMessage: string = '';
-        // Transform the chat messages into a simple prompt
-        if (!!params.messages) {
-          params.messages.forEach((msg) => {
-            if (
-              msg.role === 'system' &&
-              msg.content &&
-              typeof msg.content === 'object' &&
-              msg.content[0].text
-            ) {
-              systemMessage = msg.content[0].text;
-            } else if (
-              msg.role === 'system' &&
-              typeof msg.content === 'string'
-            ) {
-              systemMessage = msg.content;
-            }
-          });
-        }
-        return systemMessage;
-      },
-    },
-  ],
-  tools: {
-    param: 'tools',
-    required: false,
-    transform: (params: Params) => {
-      let tools: AnthropicTool[] = [];
-      if (params.tools) {
-        params.tools.forEach((tool) => {
-          if (tool.function) {
-            tools.push({
-              name: tool.function.name,
-              description: tool.function?.description || '',
-              input_schema: {
-                type: tool.function.parameters?.type || 'object',
-                properties: tool.function.parameters?.properties || {},
-                required: tool.function.parameters?.required || [],
-              },
-            });
-          }
-        });
-      }
-      return tools;
-    },
-  },
-  // None is not supported by Anthropic, defaults to auto
-  tool_choice: {
-    param: 'tool_choice',
-    required: false,
-    transform: (params: Params) => {
-      if (params.tool_choice) {
-        if (typeof params.tool_choice === 'string') {
-          if (params.tool_choice === 'required') return { type: 'any' };
-          else if (params.tool_choice === 'auto') return { type: 'auto' };
-        } else if (typeof params.tool_choice === 'object') {
-          return { type: 'tool', name: params.tool_choice.function.name };
-        }
-      }
-      return null;
-    },
-  },
-  max_tokens: {
-    param: 'max_tokens',
-    required: true,
-  },
-  max_completion_tokens: {
-    param: 'max_tokens',
-  },
-  temperature: {
-    param: 'temperature',
-    default: 1,
-    min: 0,
-    max: 1,
-  },
-  top_p: {
-    param: 'top_p',
-    default: -1,
-    min: -1,
-  },
-  top_k: {
-    param: 'top_k',
-    default: -1,
-  },
-  stop: {
-    param: 'stop_sequences',
-  },
-  stream: {
-    param: 'stream',
-    default: false,
-  },
-  user: {
-    param: 'metadata.user_id',
-  },
+  ...AnthropicChatCompleteConfig,
   anthropic_version: {
     param: 'anthropic_version',
     required: true,
     default: 'vertex-2023-10-16',
+  },
+  model: {
+    param: 'model',
+    required: false,
+    transform: (params: Params) => {
+      return undefined;
+    },
   },
 };
 
@@ -614,40 +436,59 @@ export const GoogleChatCompleteResponseTransform: (
       id: 'portkey-' + crypto.randomUUID(),
       object: 'chat_completion',
       created: Math.floor(Date.now() / 1000),
-      model: 'Unknown',
+      model: response.modelVersion,
       provider: GOOGLE_VERTEX_AI,
       choices:
         response.candidates?.map((generation, index) => {
-          let message: Message = { role: 'assistant', content: '' };
-          if (generation.content?.parts[0]?.text) {
-            message = {
-              role: 'assistant',
-              content: generation.content.parts[0]?.text,
-            };
-          } else if (generation.content?.parts[0]?.functionCall) {
-            message = {
-              role: 'assistant',
-              tool_calls: generation.content.parts.map((part) => {
-                if (part.functionCall) {
-                  return {
-                    id: 'portkey-' + crypto.randomUUID(),
-                    type: 'function',
-                    function: {
-                      name: part.functionCall.name,
-                      arguments: JSON.stringify(part.functionCall.args),
-                    },
-                  };
-                }
-              }),
+          // transform tool calls and content by iterating over the content parts
+          let toolCalls: ToolCall[] = [];
+          let content: string | undefined;
+          for (const part of generation.content?.parts ?? []) {
+            if (part.functionCall) {
+              toolCalls.push({
+                id: 'portkey-' + crypto.randomUUID(),
+                type: 'function',
+                function: {
+                  name: part.functionCall.name,
+                  arguments: JSON.stringify(part.functionCall.args),
+                },
+              });
+            } else if (part.text) {
+              // if content is already set to the chain of thought message and the user requires both the CoT message and the completion, we need to append the completion to the CoT message
+              if (content?.length && !strictOpenAiCompliance) {
+                content += '\r\n\r\n' + part.text;
+              } else {
+                // if content is already set to CoT, but user requires only the completion, we need to set content to the completion
+                content = part.text;
+              }
+            }
+          }
+
+          const message = {
+            role: MESSAGE_ROLES.ASSISTANT,
+            ...(toolCalls.length && { tool_calls: toolCalls }),
+            ...(content && { content }),
+          };
+          const logprobsContent: Logprobs[] | null =
+            transformVertexLogprobs(generation);
+          let logprobs;
+          if (logprobsContent) {
+            logprobs = {
+              content: logprobsContent,
             };
           }
+
           return {
             message: message,
             index: index,
             finish_reason: generation.finishReason,
+            logprobs,
             ...(!strictOpenAiCompliance && {
               safetyRatings: generation.safetyRatings,
             }),
+            ...(!strictOpenAiCompliance && generation.groundingMetadata
+              ? { groundingMetadata: generation.groundingMetadata }
+              : {}),
           };
         }) ?? [],
       usage: {
@@ -665,7 +506,13 @@ export const VertexLlamaChatCompleteConfig: ProviderConfig = {
   model: {
     param: 'model',
     required: true,
-    default: 'meta/llama3-405b-instruct-maas',
+    default: 'meta/llama-3.1-405b-instruct-maas',
+    transform: (params: Params) => {
+      return (
+        params.model?.replace('meta.', 'meta/') ||
+        'meta/llama-3.1-405b-instruct-maas'
+      );
+    },
   },
   messages: {
     param: 'messages',
@@ -716,9 +563,11 @@ export const GoogleChatCompleteStreamChunkTransform: (
 ) => string = (
   responseChunk,
   fallbackId,
-  _streamState,
+  streamState,
   strictOpenAiCompliance
 ) => {
+  streamState.containsChainOfThoughtMessage =
+    streamState?.containsChainOfThoughtMessage ?? false;
   const chunk = responseChunk
     .trim()
     .replace(/^data: /, '')
@@ -743,15 +592,36 @@ export const GoogleChatCompleteStreamChunkTransform: (
     id: fallbackId,
     object: 'chat.completion.chunk',
     created: Math.floor(Date.now() / 1000),
-    model: '',
+    model: parsedChunk.modelVersion,
     provider: GOOGLE_VERTEX_AI,
     choices:
       parsedChunk.candidates?.map((generation, index) => {
         let message: Message = { role: 'assistant', content: '' };
         if (generation.content?.parts[0]?.text) {
+          if (generation.content.parts[0].thought)
+            streamState.containsChainOfThoughtMessage = true;
+
+          let content: string =
+            strictOpenAiCompliance && streamState.containsChainOfThoughtMessage
+              ? ''
+              : generation.content.parts[0]?.text;
+          if (generation.content.parts[1]?.text) {
+            if (strictOpenAiCompliance)
+              content = generation.content.parts[1].text;
+            else content += '\r\n\r\n' + generation.content.parts[1]?.text;
+            streamState.containsChainOfThoughtMessage = false;
+          } else if (
+            streamState.containsChainOfThoughtMessage &&
+            !generation.content.parts[0]?.thought
+          ) {
+            if (strictOpenAiCompliance)
+              content = generation.content.parts[0].text;
+            else content = '\r\n\r\n' + content;
+            streamState.containsChainOfThoughtMessage = false;
+          }
           message = {
             role: 'assistant',
-            content: generation.content.parts[0]?.text,
+            content,
           };
         } else if (generation.content?.parts[0]?.functionCall) {
           message = {
@@ -778,9 +648,14 @@ export const GoogleChatCompleteStreamChunkTransform: (
           ...(!strictOpenAiCompliance && {
             safetyRatings: generation.safetyRatings,
           }),
+          ...(!strictOpenAiCompliance && generation.groundingMetadata
+            ? { groundingMetadata: generation.groundingMetadata }
+            : {}),
         };
       }) ?? [],
-    usage: usageMetadata,
+    ...(parsedChunk.usageMetadata?.candidatesTokenCount && {
+      usage: usageMetadata,
+    }),
   };
 
   return `data: ${JSON.stringify(dataChunk)}\n\n`;
@@ -806,8 +681,15 @@ export const AnthropicErrorResponseTransform: (
 
 export const VertexAnthropicChatCompleteResponseTransform: (
   response: AnthropicChatCompleteResponse | AnthropicErrorResponse,
-  responseStatus: number
-) => ChatCompletionResponse | ErrorResponse = (response, responseStatus) => {
+  responseStatus: number,
+  responseHeaders: Headers,
+  strictOpenAiCompliance: boolean
+) => ChatCompletionResponse | ErrorResponse = (
+  response,
+  responseStatus,
+  _responseHeaders,
+  strictOpenAiCompliance
+) => {
   if (responseStatus !== 200) {
     const errorResposne = AnthropicErrorResponseTransform(
       response as AnthropicErrorResponse
@@ -818,10 +700,20 @@ export const VertexAnthropicChatCompleteResponseTransform: (
   if ('content' in response) {
     const { input_tokens = 0, output_tokens = 0 } = response?.usage;
 
-    let content = '';
-    if (response.content.length && response.content[0].type === 'text') {
-      content = response.content[0].text;
-    }
+    let content: AnthropicContentItem[] | string = strictOpenAiCompliance
+      ? ''
+      : [];
+    response.content.forEach((item) => {
+      if (!strictOpenAiCompliance && Array.isArray(content)) {
+        if (['text', 'thinking'].includes(item.type)) {
+          content.push(item);
+        }
+      } else {
+        if (item.type === 'text') {
+          content += item.text;
+        }
+      }
+    });
 
     let toolCalls: any = [];
     response.content.forEach((item) => {
@@ -869,8 +761,14 @@ export const VertexAnthropicChatCompleteResponseTransform: (
 export const VertexAnthropicChatCompleteStreamChunkTransform: (
   response: string,
   fallbackId: string,
-  streamState: Record<string, boolean>
-) => string | undefined = (responseChunk, fallbackId, streamState) => {
+  streamState: AnthropicStreamState,
+  strictOpenAiCompliance: boolean
+) => string | undefined = (
+  responseChunk,
+  fallbackId,
+  streamState,
+  strictOpenAiCompliance
+) => {
   let chunk = responseChunk.trim();
 
   if (
@@ -889,17 +787,32 @@ export const VertexAnthropicChatCompleteStreamChunkTransform: (
   chunk = chunk.replace(/^event: content_block_start[\r\n]*/, '');
   chunk = chunk.replace(/^event: message_delta[\r\n]*/, '');
   chunk = chunk.replace(/^event: message_start[\r\n]*/, '');
+  chunk = chunk.replace(/^event: error[\r\n]*/, '');
   chunk = chunk.replace(/^data: /, '');
   chunk = chunk.trim();
 
   const parsedChunk: AnthropicChatCompleteStreamResponse = JSON.parse(chunk);
 
-  if (
-    parsedChunk.type === 'content_block_start' &&
-    parsedChunk.content_block?.type === 'text'
-  ) {
-    streamState.containsChainOfThoughtMessage = true;
-    return;
+  if (parsedChunk.type === 'error' && parsedChunk.error) {
+    return (
+      `data: ${JSON.stringify({
+        id: fallbackId,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: '',
+        provider: GOOGLE_VERTEX_AI,
+        choices: [
+          {
+            finish_reason: parsedChunk.error.type,
+            delta: {
+              content: '',
+            },
+          },
+        ],
+      })}` +
+      '\n\n' +
+      'data: [DONE]\n\n'
+    );
   }
 
   if (parsedChunk.type === 'message_start' && parsedChunk.message?.usage) {
@@ -952,17 +865,19 @@ export const VertexAnthropicChatCompleteStreamChunkTransform: (
   const toolCalls = [];
   const isToolBlockStart: boolean =
     parsedChunk.type === 'content_block_start' &&
-    !!parsedChunk.content_block?.id;
+    parsedChunk.content_block?.type === 'tool_use';
+  if (isToolBlockStart) {
+    streamState.toolIndex = streamState.toolIndex
+      ? streamState.toolIndex + 1
+      : 0;
+  }
   const isToolBlockDelta: boolean =
     parsedChunk.type === 'content_block_delta' &&
     !!parsedChunk.delta.partial_json;
-  const toolIndex: number = streamState.containsChainOfThoughtMessage
-    ? parsedChunk.index - 1
-    : parsedChunk.index;
 
   if (isToolBlockStart && parsedChunk.content_block) {
     toolCalls.push({
-      index: toolIndex,
+      index: streamState.toolIndex,
       id: parsedChunk.content_block.id,
       type: 'function',
       function: {
@@ -972,12 +887,20 @@ export const VertexAnthropicChatCompleteStreamChunkTransform: (
     });
   } else if (isToolBlockDelta) {
     toolCalls.push({
-      index: toolIndex,
+      index: streamState.toolIndex,
       function: {
         arguments: parsedChunk.delta.partial_json,
       },
     });
   }
+
+  const content = parsedChunk.delta?.text;
+  const thinking = !strictOpenAiCompliance
+    ? parsedChunk.delta?.thinking
+    : undefined;
+  const signature = !strictOpenAiCompliance
+    ? parsedChunk.delta?.signature
+    : undefined;
 
   return (
     `data: ${JSON.stringify({
@@ -989,7 +912,9 @@ export const VertexAnthropicChatCompleteStreamChunkTransform: (
       choices: [
         {
           delta: {
-            content: parsedChunk.delta?.text,
+            content,
+            thinking,
+            signature,
             tool_calls: toolCalls.length ? toolCalls : undefined,
           },
           index: 0,

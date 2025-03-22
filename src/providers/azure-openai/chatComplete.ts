@@ -87,11 +87,35 @@ export const AzureOpenAIChatCompleteConfig: ProviderConfig = {
   response_format: {
     param: 'response_format',
   },
+  store: {
+    param: 'store',
+  },
+  metadata: {
+    param: 'metadata',
+  },
+  modalities: {
+    param: 'modalities',
+  },
+  audio: {
+    param: 'audio',
+  },
+  seed: {
+    param: 'seed',
+  },
+  prediction: {
+    param: 'prediction',
+  },
+  reasoning_effort: {
+    param: 'reasoning_effort',
+  },
+  stream_options: {
+    param: 'stream_options',
+  },
 };
 
 interface AzureOpenAIChatCompleteResponse extends ChatCompletionResponse {}
 
-export const AzureOpenAIChatCompleteResponseTransform: (
+export const AzureOpenAIResponseTransform: (
   response: AzureOpenAIChatCompleteResponse | ErrorResponse,
   responseStatus: number
 ) => ChatCompletionResponse | ErrorResponse = (response, responseStatus) => {

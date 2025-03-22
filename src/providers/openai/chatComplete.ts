@@ -99,6 +99,24 @@ export const OpenAIChatCompleteConfig: ProviderConfig = {
   max_completion_tokens: {
     param: 'max_completion_tokens',
   },
+  store: {
+    param: 'store',
+  },
+  metadata: {
+    param: 'metadata',
+  },
+  modalities: {
+    param: 'modalities',
+  },
+  audio: {
+    param: 'audio',
+  },
+  prediction: {
+    param: 'prediction',
+  },
+  reasoning_effort: {
+    param: 'reasoning_effort',
+  },
 };
 
 export interface OpenAIChatCompleteResponse extends ChatCompletionResponse {
@@ -128,13 +146,14 @@ export const OpenAIChatCompleteJSONToStreamResponseTransform: (
   provider: string
 ) => Array<string> = (response, provider) => {
   const streamChunkArray: Array<string> = [];
-  const { id, model, system_fingerprint, choices } = response;
+  const { id, model, system_fingerprint, choices, citations } = response;
 
   const {
     prompt_tokens,
     completion_tokens,
     cache_read_input_tokens,
     cache_creation_input_tokens,
+    num_search_queries,
   } = response.usage || {};
 
   let total_tokens;
@@ -161,7 +180,9 @@ export const OpenAIChatCompleteJSONToStreamResponseTransform: (
         cache_read_input_tokens,
         cache_creation_input_tokens,
       }),
+      ...(num_search_queries && { num_search_queries }),
     },
+    ...(citations && { citations }),
   };
 
   for (const [index, choice] of choices.entries()) {
@@ -230,8 +251,8 @@ export const OpenAIChatCompleteJSONToStreamResponseTransform: (
       typeof choice.message.content === 'string'
     ) {
       const inidividualWords: Array<string> = [];
-      for (let i = 0; i < choice.message.content.length; i += 4) {
-        inidividualWords.push(choice.message.content.slice(i, i + 4));
+      for (let i = 0; i < choice.message.content.length; i += 500) {
+        inidividualWords.push(choice.message.content.slice(i, i + 500));
       }
       inidividualWords.forEach((word: string) => {
         streamChunkArray.push(
@@ -244,6 +265,9 @@ export const OpenAIChatCompleteJSONToStreamResponseTransform: (
                   role: 'assistant',
                   content: word,
                 },
+                ...(choice.groundingMetadata && {
+                  groundingMetadata: choice.groundingMetadata,
+                }),
               },
             ],
           })}\n\n`

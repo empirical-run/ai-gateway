@@ -2,7 +2,7 @@
 <img src="/docs/images/gateway-border.png" width=350>
 
 <p align="right">
-<a href="./README.md">English</a>|<strong>中文</strong> 
+<a href="../README.md">English</a> | <strong>中文</strong> | <a href="./README.jp.md">日本語</a>
 </p>
 
 # AI Gateway
@@ -26,12 +26,22 @@
 
 ### 安装
 
-如果您熟悉Node.js和`npx`，您可以在本地运行您的私有AI网关。([其它部署选项](#deploying-ai-gateway))
+如果您熟悉Node.js和`npx`，您可以在本地运行您的私有AI网关。
 
 ```
 npx @portkey-ai/gateway
 ```
 
+<sup>
+[ 其它部署选项 ]
+&nbsp; <a href="https://portkey.wiki/gh-18"><img height="12" width="12" src="https://cfassets.portkey.ai/logo/dew-color.svg" /> Portkey Cloud 官方部署(推荐)</a>
+&nbsp; <a href="../docs/installation-deployments.md#docker"><img height="12" width="12" src="https://cdn.simpleicons.org/docker/3776AB" /> Docker</a>
+&nbsp; <a href="../docs/installation-deployments.md#nodejs-server"><img height="12" width="12" src="https://cdn.simpleicons.org/node.js/3776AB" /> Node.js</a>
+&nbsp; <a href="../docs/installation-deployments.md#cloudflare-workers"><img height="12" width="12" src="https://cdn.simpleicons.org/cloudflare/3776AB" /> Cloudflare</a>
+&nbsp; <a href="../docs/installation-deployments.md#replit"><img height="12" width="12" src="https://cdn.simpleicons.org/replit/3776AB" /> Replit</a>
+&nbsp; <a href="../docs/installation-deployments.md"> 其它...</a>
+
+</sup>
 > 您的AI网关现在运行在 [http://localhost:8787](http://localhost:8787/) 🚀 <br>
 
 ### 使用方法
@@ -213,6 +223,7 @@ const client = new OpenAI({
 - 在 [Discord](https://portkey.ai/community) 上与我们实时交流
 - 在 [Twitter](https://twitter.com/PortkeyAI) 上关注我们
 - 在 [LinkedIn](https://www.linkedin.com/company/portkey-ai/) 上与我们建立联系
+- 阅读日文版文档 [日本語](./README.jp.md)
 
 <!-- - 在 [YouTube](https://www.youtube.com/channel/UCZph50gLNXAh1DpmeX8sBdw) 上访问我们 --> <!-- - 加入我们的 [Dev 社区](https://dev.to/portkeyai) --> <!-- - 在 [Stack Overflow](https://stackoverflow.com/questions/tagged/portkey) 上查看标记为 #portkey 的问题 -->
 

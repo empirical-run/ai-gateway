@@ -1,8 +1,7 @@
 import { GatewayError } from '../errors/GatewayError';
-import { MULTIPART_FORM_DATA_ENDPOINTS } from '../globals';
 import ProviderConfigs from '../providers';
-import { endpointStrings } from '../providers/types';
-import { Options, Params, Targets } from '../types/requestBody';
+import { endpointStrings, ProviderConfig } from '../providers/types';
+import { Options, Params } from '../types/requestBody';
 
 /**
  * Helper function to set a nested property in an object.
@@ -65,37 +64,11 @@ const getValue = (configParam: string, params: Params, paramConfig: any) => {
   return value;
 };
 
-/**
- * Transforms the request body to match the structure required by the AI provider.
- * It also ensures the values for each parameter are within the minimum and maximum
- * constraints defined in the provider's configuration. If a required parameter is missing,
- * it assigns the default value from the provider's configuration.
- *
- * @param provider - The name of the AI provider.
- * @param params - The parameters for the request.
- * @param fn - The function to call on the AI provider.
- *
- * @returns The transformed request body.
- *
- * @throws {Error} If the provider is not supported.
- */
-const transformToProviderRequestJSON = (
-  provider: string,
+export const transformUsingProviderConfig = (
+  providerConfig: ProviderConfig,
   params: Params,
-  fn: string
-): { [key: string]: any } => {
-  // Get the configuration for the specified provider
-  let providerConfig = ProviderConfigs[provider];
-  if (providerConfig.getConfig) {
-    providerConfig = providerConfig.getConfig(params)[fn];
-  } else {
-    providerConfig = providerConfig[fn];
-  }
-
-  if (!providerConfig) {
-    throw new GatewayError(`${fn} is not supported by ${provider}`);
-  }
-
+  providerOptions?: Options
+) => {
   const transformedRequest: { [key: string]: any } = {};
 
   // For each parameter in the provider's configuration
@@ -125,17 +98,54 @@ const transformToProviderRequestJSON = (
         paramConfig.required &&
         paramConfig.default !== undefined
       ) {
+        let value;
+        if (typeof paramConfig.default === 'function') {
+          value = paramConfig.default(params, providerOptions);
+        } else {
+          value = paramConfig.default;
+        }
         // Set the transformed parameter to the default value
-        setNestedProperty(
-          transformedRequest,
-          paramConfig.param,
-          paramConfig.default
-        );
+        setNestedProperty(transformedRequest, paramConfig.param, value);
       }
     }
   }
 
   return transformedRequest;
+};
+
+/**
+ * Transforms the request body to match the structure required by the AI provider.
+ * It also ensures the values for each parameter are within the minimum and maximum
+ * constraints defined in the provider's configuration. If a required parameter is missing,
+ * it assigns the default value from the provider's configuration.
+ *
+ * @param provider - The name of the AI provider.
+ * @param params - The parameters for the request.
+ * @param fn - The function to call on the AI provider.
+ *
+ * @returns The transformed request body.
+ *
+ * @throws {Error} If the provider is not supported.
+ */
+const transformToProviderRequestJSON = (
+  provider: string,
+  params: Params,
+  fn: string,
+  providerOptions: Options
+): { [key: string]: any } => {
+  // Get the configuration for the specified provider
+  let providerConfig = ProviderConfigs[provider];
+  if (providerConfig.getConfig) {
+    providerConfig = providerConfig.getConfig(params)[fn];
+  } else {
+    providerConfig = providerConfig[fn];
+  }
+
+  if (!providerConfig) {
+    throw new GatewayError(`${fn} is not supported by ${provider}`);
+  }
+
+  return transformUsingProviderConfig(providerConfig, params, providerOptions);
 };
 
 const transformToProviderRequestFormData = (
@@ -165,11 +175,35 @@ const transformToProviderRequestFormData = (
         paramConfig.required &&
         paramConfig.default !== undefined
       ) {
-        formData.append(paramConfig.param, paramConfig.default);
+        let value;
+        if (typeof paramConfig.default === 'function') {
+          value = paramConfig.default(params);
+        } else {
+          value = paramConfig.default;
+        }
+        formData.append(paramConfig.param, value);
       }
     }
   }
   return formData;
+};
+
+const transformToProviderRequestReadableStream = (
+  provider: string,
+  requestBody: ReadableStream,
+  requestHeaders: Record<string, string>,
+  fn: string
+) => {
+  if (ProviderConfigs[provider].getConfig) {
+    return ProviderConfigs[provider]
+      .getConfig({}, fn)
+      .requestTransforms[fn](requestBody, requestHeaders);
+  } else {
+    return ProviderConfigs[provider].requestTransforms[fn](
+      requestBody,
+      requestHeaders
+    );
+  }
 };
 
 /**
@@ -184,17 +218,39 @@ const transformToProviderRequestFormData = (
 export const transformToProviderRequest = (
   provider: string,
   params: Params,
-  inputParams: Params | FormData,
-  fn: endpointStrings
+  requestBody: Params | FormData | ArrayBuffer | ReadableStream | ArrayBuffer,
+  fn: endpointStrings,
+  requestHeaders: Record<string, string>,
+  providerOptions: Options
 ) => {
-  if (MULTIPART_FORM_DATA_ENDPOINTS.includes(fn)) return inputParams;
+  // this returns a ReadableStream
+  if (fn === 'uploadFile') {
+    return transformToProviderRequestReadableStream(
+      provider,
+      requestBody as ReadableStream,
+      requestHeaders,
+      fn
+    );
+  }
+  if (requestBody instanceof FormData || requestBody instanceof ArrayBuffer)
+    return requestBody;
+
+  if (fn === 'proxy') {
+    return params;
+  }
+
   const providerAPIConfig = ProviderConfigs[provider].api;
   if (
     providerAPIConfig.transformToFormData &&
     providerAPIConfig.transformToFormData({ gatewayRequestBody: params })
   )
     return transformToProviderRequestFormData(provider, params as Params, fn);
-  return transformToProviderRequestJSON(provider, params as Params, fn);
+  return transformToProviderRequestJSON(
+    provider,
+    params as Params,
+    fn,
+    providerOptions
+  );
 };
 
 export default transformToProviderRequest;
